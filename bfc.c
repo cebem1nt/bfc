@@ -1,9 +1,10 @@
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define DEFAULT_TAPE_SIZE 30000 // Size as cells
-#define MAX_TAPE_SIZE 60000 
+#define MAX_TAPE_SIZE 60000
 
 #define MAX_PATH_LENGTH 1024
 #define MAX_STACK_SIZE 1024
@@ -11,7 +12,7 @@
 #define ARG_IS(a, b) (strcmp(a, b) == 0)
 
 struct args {
-    unsigned int tape_size;
+    size_t tape_size;
     char input_file[MAX_PATH_LENGTH];
 };
 
@@ -21,14 +22,14 @@ parse_arg(char* arg, struct args* a)
     if (ARG_IS(arg, "-t")) {
         arg++;
 
-        if (*arg == '\n') {
+        if (*arg == '\n' || *arg == '\0') {
             fprintf(stderr, "Tape size expected, got nothing.\n");
             exit(1);
         }
 
-        unsigned int tape_size;
+        size_t tape_size;
 
-        if (sscanf(arg, "%u", &tape_size) != 1) {
+        if (sscanf(arg, "%zu", &tape_size) != 1) {
             fprintf(stderr, "Could not understand buffer size. Perhaps it's written wrong?\n");
             exit(1);
         }
@@ -89,13 +90,13 @@ parse_args(int argc, char** argv)
 }
 
 void
-in_action(unsigned char* tape, unsigned int ptr) 
+in_action(unsigned char* tape, size_t ptr) 
 {
     tape[ptr] = (unsigned char) getchar();
 }
 
 void
-out_action(unsigned char* tape, unsigned int ptr) 
+out_action(unsigned char* tape, size_t ptr) 
 {
     putchar(tape[ptr]);
 }
@@ -103,93 +104,142 @@ out_action(unsigned char* tape, unsigned int ptr)
 void 
 interpret(struct args a)
 {
-    FILE *inputf = fopen(a.input_file, "rb");
+    FILE* inputf = fopen(a.input_file, "rb");
 
-    if (!inputf) { 
+    if (!inputf) {
         fprintf(stderr, "Could not open file \"%s\", perhaps it doesn't exist\n?", a.input_file);
-        exit(1); 
+        exit(1);
     }
 
-    unsigned char tape[a.tape_size];
-    unsigned int ptr = 0;
+    if (fseek(inputf, 0, SEEK_END) != 0) {
+        perror("fseek");
+        fclose(inputf);
+        exit(1);
+    }
+
+    long prog_len = ftell(inputf);
+
+    if (prog_len < 0) {
+        perror("ftell");
+        fclose(inputf);
+        exit(1);
+    }
+
+    rewind(inputf);
+
+    char* program = malloc(( size_t) prog_len + 1) ;
+
+    if (!program) {
+        fprintf(stderr, "Out of memory reading program\n");
+        fclose(inputf);
+        exit(1);
+    }
+
+    size_t read = fread(program, 1, (size_t) prog_len, inputf);
+    program[read] = '\0';
+    fclose(inputf);
+
+    // Firstly precompute bracket matches
+    int* match = malloc((read) * sizeof(int));
+
+    if (!match) {
+        fprintf(stderr, "Out of memory\n");
+        free(program);
+        exit(1);
+    }
 
     long stack[MAX_STACK_SIZE];
-    unsigned int stack_top = 1;
+    int stack_top = 0;
+
+    for (size_t i = 0; i < read; i++) {
+        char c = program[i];
+
+        if (c == '[') {
+            if (stack_top < MAX_STACK_SIZE) {
+                stack[stack_top++] = (long) i;
+            } else {
+                fprintf(stderr, "Bracket stack overflow during precompute!\n");
+                free(program);
+                free(match);
+                exit(1);
+            }
+
+        } else if (c == ']') {
+            if (stack_top == 0) {
+                fprintf(stderr, "Unmatched ']' in program\n");
+                free(program);
+                free(match);
+                exit(1);
+            }
+
+            long open_pos = stack[--stack_top];
+            match[open_pos] = (int) i;
+            match[i] = (int) open_pos;
+        }
+    }
+
+    if (stack_top != 0) {
+        fprintf(stderr, "Unmatched '[' in program\n");
+        free(program);
+        free(match);
+        exit(1);
+    }
+
+    unsigned char* tape = calloc(a.tape_size, 1);
     
+    if (!tape) {
+        fprintf(stderr, "Out of memory for tape\n");
+        free(program);
+        free(match);
+        exit(1);
+    }
 
-    int c;
+    size_t ptr = 0;
 
-    while ( ( c = fgetc(inputf ) ) != EOF) {
-        unsigned char inst = (unsigned char) c;
+    for (size_t ip = 0; ip < read; ip++) {
+        unsigned char inst = (unsigned char) program[ip];
 
         switch (inst) {
             case '+': tape[ptr]++; break;
-            case '-': tape[ptr]--; break; 
+            case '-': tape[ptr]--; break;
             case '.': out_action(tape, ptr); break;
             case ',': in_action(tape, ptr); break;
 
-            case '>': 
-                ptr = (ptr + 1) % a.tape_size; 
+            case '>':
+                ptr++;
+                if (ptr >= a.tape_size) ptr = 0;
                 break;
 
-            case '<': 
-                ptr = (ptr + a.tape_size - 1) % a.tape_size; 
+            case '<':
+                if (ptr == 0) ptr = a.tape_size - 1;
+                else ptr--;
                 break;
 
             case '[':
                 if (tape[ptr] == 0) {
-                    int depth = 1;
-                    long pos;
-
-                    while (depth > 0) {
-                        pos = ftell(inputf);
-                        int nc = fgetc(inputf);
-
-                        if (nc == EOF) break; // unterminated bracket -> stop
-
-                        if (nc == '[') depth++;
-                        else if (nc == ']') depth--;
-                    }
-
-                } else {
-                    if (stack_top < MAX_STACK_SIZE) {
-                        stack[stack_top++] = ftell(inputf);
-                    } else {
-                        fprintf(stderr, "Stack overflow!\n");
-                        exit(1);
-                    }
+                    ip = (size_t) match[ip];
                 }
                 break;
 
             case ']':
-                if (stack_top == 0) {
-                    fprintf(stderr, "Unmatched ']'\n");
-                    exit(1);
-                }
-
                 if (tape[ptr] != 0) {
-                    long target = stack[stack_top - 1];
-
-                    if (fseek(inputf, target, SEEK_SET) != 0) {
-                        perror("fseek");
-                        exit(1);
-                    }
-                    
-                } else {
-                    stack_top--;
+                    // jump back to matching [
+                    ip = (size_t) match[ip];
                 }
                 break;
 
             default:
-                /* ignore other chars */
+                // ignore other chars 
                 break;
         }
     }
 
-    fclose(inputf);
+    free(program);
+    free(match);
+    free(tape);
 }
 
-int main(int argc, char** argv) 
+int main(int argc, char** argv)
 {
     struct args a = parse_args(argc, argv);
     interpret(a);
